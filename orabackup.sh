@@ -13,7 +13,11 @@
 #Revision|Date_____|By_________|_Object______________________________________
 #  1.0   |         | J.SARAIVA | Creation
 #  1.1   | 20170126| J.SARAIVA | Added tee to execution log
-#  1.2	 | 20170222| J.SARAIVA | Removed tns from orabackup.cfg, using tnsnames.ora
+#  1.2   | 20170222| J.SARAIVA | Removed TNS from orabackup.cfg, get it from tnsnames.ora
+#							   | Moved channel allocation parameter to config file
+#							   | Removed spfile and controlfile explicit backup and configured autobackup
+#							   | Implemented retry of archivelog backup 
+#							   | Added tmp and log cleanup function
 #######################################################################################################
 
 SOURCE="${BASH_SOURCE[0]}" #JPS# the script is sourced so this have to be used instead of $0 below
@@ -23,17 +27,17 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ABSOLUTE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 REVISION="1.1"
-LASTUPDATE="2017-01-11"
+LASTUPDATE="2017-02-22"
 DATA=`date "+%Y%m%d_%H%M%S"`
 
 DEBUG=0
 
 #constants
 RMANARC="BACKUP ARCHIVELOG ALL FILESPERSET 10 FORMAT 'ARCH_%d_%T_%U' TAG 'ARCHIVELOG' DELETE ALL INPUT;"
-RMANL0="BACKUP INCREMENTAL LEVEL 0 FILESPERSET 10 FORMAT 'L0I_%d_%T_%U' TAG 'L0I' DATABASE;"
-RMANL1="BACKUP INCREMENTAL LEVEL 1 FILESPERSET 10 FORMAT 'L1I_%d_%T_%U' TAG 'L1I' DATABASE;"
-RMANSPF="BACKUP SPFILE FORMAT 'SPF_%d_%T_%U' TAG 'SPFILE';"
-RMANCTL="BACKUP CURRENT CONTROLFILE FORMAT 'CTL_%d_%T_%U' TAG 'CONTROLFILE';"
+RMANL0="BACKUP INCREMENTAL LEVEL 0 FILESPERSET 10 FORMAT 'l0inc_%d_%T_%U' TAG 'l0inc' DATABASE;"
+RMANL1="BACKUP INCREMENTAL LEVEL 1 FILESPERSET 10 FORMAT 'l1inc_%d_%T_%U' TAG 'l1inc' DATABASE;"
+RMANSPF="BACKUP SPFILE FORMAT 'spf_%d_%T_%U' TAG 'spfile';"
+RMANCTL="BACKUP CURRENT CONTROLFILE FORMAT 'ctl_%d_%T_%U' TAG 'controlfile';"
 
 print_revision() {
 	echo "${PROGNAME}: v${REVISION} (${LASTUPDATE})"
@@ -70,12 +74,23 @@ log() {
   echo `date "+%Y-%m-%d %H:%M:%S"`" $1" | tee -a $LOGFILE
 }
 
+
+construct_channels() {
+RMAN_CH=`grep -i ${CHNNLDEF} ${BASEDIR}/orachannel.cfg | awk -F"|" '{print $2}'`
+for i in {1..${CHNNLNUM}};
+do 
+CHNUMBER=${i}
+echo ${RMAN_CH}
+done;
+}
+
 #todo: action not being validated
 exec_catalog() {
 CATALOG=${_CATALOG}
 #check db conectivity
 CTLG_DB=`grep -i ${CATALOG} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $1}'`
 CTLG_USER=`grep -i ${CATALOG} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $2}'`
+CTLG_PASS=`grep -i ${CATALOG} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $3}'`
 CTLG_PASS=`grep -i ${CATALOG} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $3}'`
 CTLG_TNS=`grep -i ${CATALOG} ${BASEDIR}/tnsnames.ora | cut -d= -f2-`
 
@@ -116,13 +131,13 @@ exec_backup() {
   BACKUP_TYPE=${_BKTYPE}
   case ${BACKUP_TYPE} in
     l0) 
-      RMANOP=`printf "%s\n%s\n%s\n%s\n%s\n" "${RMANARC}" "${RMANL0}" "${RMANARC}" "${RMANSPF}" "${RMANCTL}"`
+      RMANOP=`printf "%s\n%s\n%s\n%s\n%s\n" "${RMANARC}" "${RMANL0}" "${RMANARC}"`
       ;;
     l1)
-      RMANOP=`printf "%s\n%s\n%s\n%s\n%s\n" "${RMANARC}" "${RMANL1}" "${RMANARC}" "${RMANSPF}" "${RMANCTL}"`
+      RMANOP=`printf "%s\n%s\n%s\n%s\n%s\n" "${RMANARC}" "${RMANL1}" "${RMANARC}"`
       ;;
     arc|arch)
-      RMANOP=`printf "%s\n%s\n%s\n" "${RMANARC}" "${RMANSPF}" "${RMANCTL}"`
+      RMANOP=`printf "%s\n%s\n%s\n" "${RMANARC}"`
       ;;
     *) 
       print_help
@@ -134,10 +149,14 @@ exec_backup() {
   DBCONNECT="${USERNAME}/${PASSWORD}@\"${TNSNAMES}\""
   CONF_RMAN_RETENTION="CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF ${RTENTION} DAYS;"
   CONF_RMAN_CTL_AUTOBCK_ON="CONFIGURE CONTROLFILE AUTOBACKUP ON;"
-  RMANCH0="allocate channel 'ch0' type 'sbt_tape' parms 'SBT_LIBRARY=/opt/omni/lib/libob2oracle8_64bit.so,ENV=(OB2BARTYPE=Oracle8,OB2APPNAME=${DATABASE},OB2BARLIST=H_FULL_ORA_RACPRD05_${DATABASE})';"
-  RMANCH1="allocate channel 'ch1' type 'sbt_tape' parms 'SBT_LIBRARY=/opt/omni/lib/libob2oracle8_64bit.so,ENV=(OB2BARTYPE=Oracle8,OB2APPNAME=${DATABASE},OB2BARLIST=H_FULL_ORA_RACPRD05_${DATABASE})';"
-  RMANCH2="allocate channel 'ch2' type 'sbt_tape' parms 'SBT_LIBRARY=/opt/omni/lib/libob2oracle8_64bit.so,ENV=(OB2BARTYPE=Oracle8,OB2APPNAME=${DATABASE},OB2BARLIST=H_FULL_ORA_RACPRD05_${DATABASE})';"
-  RMANCH3="allocate channel 'ch3' type 'sbt_tape' parms 'SBT_LIBRARY=/opt/omni/lib/libob2oracle8_64bit.so,ENV=(OB2BARTYPE=Oracle8,OB2APPNAME=${DATABASE},OB2BARLIST=H_FULL_ORA_RACPRD05_${DATABASE})';"
+  
+  #configure channels
+  RMANCHANNELS
+  
+  #RMANCH0="allocate channel 'ch0' type 'sbt_tape' parms 'SBT_LIBRARY=/opt/omni/lib/libob2oracle8_64bit.so,ENV=(OB2BARTYPE=Oracle8,OB2APPNAME=${DATABASE},OB2BARLIST=H_FULL_ORA_RACPRD05_${DATABASE})';"
+  #RMANCH1="allocate channel 'ch1' type 'sbt_tape' parms 'SBT_LIBRARY=/opt/omni/lib/libob2oracle8_64bit.so,ENV=(OB2BARTYPE=Oracle8,OB2APPNAME=${DATABASE},OB2BARLIST=H_FULL_ORA_RACPRD05_${DATABASE})';"
+  #RMANCH2="allocate channel 'ch2' type 'sbt_tape' parms 'SBT_LIBRARY=/opt/omni/lib/libob2oracle8_64bit.so,ENV=(OB2BARTYPE=Oracle8,OB2APPNAME=${DATABASE},OB2BARLIST=H_FULL_ORA_RACPRD05_${DATABASE})';"
+  #RMANCH3="allocate channel 'ch3' type 'sbt_tape' parms 'SBT_LIBRARY=/opt/omni/lib/libob2oracle8_64bit.so,ENV=(OB2BARTYPE=Oracle8,OB2APPNAME=${DATABASE},OB2BARLIST=H_FULL_ORA_RACPRD05_${DATABASE})';"
   
   #prepare backup 
   RMANLOG=${BASEDIR}/log/rman_${DATABASE}_${BACKUP_TYPE}_${DATA}.log
@@ -230,6 +249,8 @@ DATABASE=`grep -i ${DB} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $1}'`
 USERNAME=`grep -i ${DB} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $2}'`
 PASSWORD=`grep -i ${DB} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $3}'`
 RTENTION=`grep -i ${DB} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $4}'`
+CHNNLDEF=`grep -i ${DB} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $5}'`
+CHNNLNUM=`grep -i ${DB} ${BASEDIR}/${FILENAME}.cfg | awk -F"|" '{print $6}'`
 TNSNAMES=`grep -i ${DB} ${BASEDIR}/tnsnames.ora | cut -d= -f2-`
 
 SQLTEST=`sqlplus -v 2>/dev/null`
@@ -237,6 +258,8 @@ if [[ -z $SQLTEST ]]; then
   log "ERR: sqlplus not found"
   exit 2
 fi
+
+export NLS_DATE_FORMAT='DD-MM-YYYY HH24:MI:SS'
 
 if [[ ! -z ${_BKTYPE} ]]; then
   exec_backup
