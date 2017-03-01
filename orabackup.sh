@@ -20,6 +20,9 @@
 #                              | Added tmp and log cleanup function
 #                              | Added force option to ignore running backups
 #                              | Catalog operation are now evaluated
+#  1.2.1 | 20170227| J.SARAIVA | Fixed bug on log validation
+#                              | Modified the rerun backup log to have a .2
+#  1.2.2 | 20170301| J.SARAIVA | Added feature to send email with log when error occurs
 #######################################################################################################
 
 SOURCE="${BASH_SOURCE[0]}" #JPS# the script is sourced so this have to be used instead of $0 below
@@ -28,8 +31,8 @@ FILENAME="${PROGNAME%.*}"
 BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ABSOLUTE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-REVISION="1.2"
-LASTUPDATE="2017-02-22"
+REVISION="1.2.1"
+LASTUPDATE="2017-02-27"
 DATA=`date "+%Y%m%d_%H%M%S"`
 
 DEBUG=0
@@ -174,6 +177,10 @@ validate_backup() {
  ERRCOUNT=`egrep "ORA-|RMAN-" ${RMANLOG} | egrep -v "RMAN-08120" | wc -l`
  if [[ ERRCOUNT -gt 0 ]]; then
   log "ERR: Backup failed with ${ERRCOUNT} error(s)"
+  if [[ ! -z ${EMAILIST} ]]; then #send email with errors if email is defined
+	ERRORS=`sed -n "/RMAN-00571/,/Recovery Manager complete./p" ${RMANLOG}`
+	echo "$ERRORS" | mailx -s "Backup ${BACKUP_TYPE}@${DATABASE} ended with error" -a ${RMANLOG} ${EMAILIST} 2>/dev/null 
+  fi
   return 2 #will allow for a rerun
  else
   log "INF : Backup completed successfuly"
@@ -247,8 +254,9 @@ exec_backup() {
   
   #retry failed arc
   if [[ ( $? -eq 2 ) ]]; then # if backup failed
-    if [[ ${BACKUP_TYPE} -eq 'arc' ]]; then  # and it is arc, retry
+    if [[ ${BACKUP_TYPE} = 'arc' ]]; then  # and it is arc, retry
       log "INF : Retrying"
+	  RMANLOG=${BASEDIR}/log/rman_${DATABASE}_${BACKUP_TYPE}_${DATA}.2.log # use new log
       run_backup
       validate_backup
       if [[ ( $? -eq 2 ) ]]; then            # if still fail after retrial, error; if not continue
@@ -347,9 +355,10 @@ PASSWORD=`grep -i ${DB} ${BASEDIR}/orabackup.cfg | awk -F"|" '{print $3}'`
 RTENTION=`grep -i ${DB} ${BASEDIR}/orabackup.cfg | awk -F"|" '{print $4}'`
 CHNNLDEF=`grep -i ${DB} ${BASEDIR}/orabackup.cfg | awk -F"|" '{print $5}'`
 CHNNLNUM=`grep -i ${DB} ${BASEDIR}/orabackup.cfg | awk -F"|" '{print $6}'`
+EMAILIST=`grep -i ${DB} ${BASEDIR}/orabackup.cfg | awk -F"|" '{print $7}'`
 TNSNAMES=`grep -i ${DB} ${BASEDIR}/tnsnames.ora | cut -d= -f2-`
 
-if [[ -z ${USERNAME} || -z ${PASSWORD} || -< ${RETENTION} || -z ${CHNNLDEF} || -z ${CHNNLNUM} || -z ${TNSNAMES} ]]; then
+if [[ -z ${USERNAME} || -z ${PASSWORD} || -z ${RETENTION} || -z ${CHNNLDEF} || -z ${CHNNLNUM} || -z ${TNSNAMES} ]]; then
  log "ERR: unable to get proper configuration for database ${DB}"
  exit 2
 fi
