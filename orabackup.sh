@@ -358,7 +358,7 @@ CHNNLNUM=`grep -i ${DB} ${BASEDIR}/orabackup.cfg | awk -F"|" '{print $6}'`
 EMAILIST=`grep -i ${DB} ${BASEDIR}/orabackup.cfg | awk -F"|" '{print $7}'`
 TNSNAMES=`grep -i ${DB} ${BASEDIR}/tnsnames.ora | cut -d= -f2-`
 
-if [[ -z ${USERNAME} || -z ${PASSWORD} || -z ${RETENTION} || -z ${CHNNLDEF} || -z ${CHNNLNUM} || -z ${TNSNAMES} ]]; then
+if [[ -z ${USERNAME} || -z ${PASSWORD} || -z ${RTENTION} || -z ${CHNNLDEF} || -z ${CHNNLNUM} || -z ${TNSNAMES} ]]; then
  log "ERR: unable to get proper configuration for database ${DB}"
  exit 2
 fi
