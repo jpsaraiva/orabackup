@@ -23,6 +23,7 @@
 #  1.2.1 | 20170227| J.SARAIVA | Fixed bug on log validation
 #                              | Modified the rerun backup log to have a .2
 #  1.2.2 | 20170301| J.SARAIVA | Added feature to send email with log when error occurs
+#  1.2.3 | 20170327| J.SARAIVA | Changed backup validation to consider only if error message stack exists
 #######################################################################################################
 
 SOURCE="${BASH_SOURCE[0]}" #JPS# the script is sourced so this have to be used instead of $0 below
@@ -31,8 +32,8 @@ FILENAME="${PROGNAME%.*}"
 BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ABSOLUTE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-REVISION="1.2.1"
-LASTUPDATE="2017-02-27"
+REVISION="1.2.3"
+LASTUPDATE="2017-03-27"
 DATA=`date "+%Y%m%d_%H%M%S"`
 
 DEBUG=0
@@ -172,13 +173,12 @@ validate_catalog() {
 }
 
 validate_backup() {
- #exclude from validation:
-  # RMAN-08120: WARNING: archived log not deleted, not yet applied by standby
- ERRCOUNT=`egrep "ORA-|RMAN-" ${RMANLOG} | egrep -v "RMAN-08120" | wc -l`
+ ERRCOUNT=`egrep "ERROR MESSAGE STACK FOLLOWS" ${RMANLOG} | wc -l`
  if [[ ERRCOUNT -gt 0 ]]; then
-  log "ERR: Backup failed with ${ERRCOUNT} error(s)"
+  ERRORS=`sed -n "/RMAN-00571/,/Recovery Manager complete./p" ${RMANLOG}`
+  log "ERR: Backup failed with errors:"
+  log "${ERRORS}"
   if [[ ! -z ${EMAILIST} ]]; then #send email with errors if email is defined
-	ERRORS=`sed -n "/RMAN-00571/,/Recovery Manager complete./p" ${RMANLOG}`
 	echo "$ERRORS" | mailx -s "Backup ${BACKUP_TYPE}@${DATABASE} ended with error" -a ${RMANLOG} ${EMAILIST} 2>/dev/null 
   fi
   return 2 #will allow for a rerun
