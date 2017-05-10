@@ -41,8 +41,8 @@ FILENAME="${PROGNAME%.*}"
 BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ABSOLUTE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-REVISION="1.2.3"
-LASTUPDATE="2017-05-08"
+REVISION="1.3"
+LASTUPDATE="2017-05-10"
 DATA=`date "+%Y%m%d_%H%M%S"`
 
 DEBUG=0
@@ -66,7 +66,7 @@ Usage:
         -d [DB_NAME]  # Runs the backup for the specified database
         -t [BCK_TYPE] #  l0, l1 , arc
         -c [CATALOG]  #  Resyncs with specified catalog
-		    -u            # Forces unique execution, no other sessions allowed
+        -u            # Forces unique execution, no other sessions allowed
         -f            # Forces execution ignoring runnning backups
   --block             # Blocks further backups of the specified database
   --unblock           # Removes restriction on backups of specified database
@@ -77,14 +77,14 @@ HEREDOC
 }
 
 print_help() {
-  print_revision
+ print_revision
 cat <<HEREDOC
 
   Executes backup on Oracle databases using:
 	HP DataProtectorâ„¢
 
 HEREDOC
-  print_usage
+ print_usage
 }
 
 debug() {
