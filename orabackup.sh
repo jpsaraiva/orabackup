@@ -15,7 +15,6 @@
 #  1.1   | 20170126| J.SARAIVA | Added tee to execution log
 #  1.2   | 20170222| J.SARAIVA | Removed TNS from orabackup.cfg, get it from tnsnames.ora
 #                              | Moved channel allocation parameter to config file
-#                              | Removed spfile and controlfile explicit backup and configured autobackup
 #                              | Implemented retry of archivelog backup 
 #                              | Added tmp and log cleanup function
 #                              | Added force option to ignore running backups
@@ -23,7 +22,10 @@
 #  1.2.1 | 20170227| J.SARAIVA | Fixed bug on log validation
 #                              | Modified the rerun backup log to have a .2
 #  1.2.2 | 20170301| J.SARAIVA | Added feature to send email with log when error occurs
-#  1.2.3 | 20170327| J.SARAIVA | Changed backup validation to consider only if error message stack exists
+#  1.2.3 | 20170508| J.SARAIVA | Added validation to check if there are stuck sessions and kill them
+#                              | Minor modification on how the backup retry is called
+#                              | L1 added to retrial procedure, L0 still excluded
+#                              | Added release channel procedure to backup operation
 #######################################################################################################
 
 SOURCE="${BASH_SOURCE[0]}" #JPS# the script is sourced so this have to be used instead of $0 below
@@ -33,7 +35,7 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ABSOLUTE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 REVISION="1.2.3"
-LASTUPDATE="2017-03-27"
+LASTUPDATE="2017-05-08"
 DATA=`date "+%Y%m%d_%H%M%S"`
 
 DEBUG=0
@@ -70,7 +72,7 @@ print_help() {
 cat <<HEREDOC
 
   Executes backup on Oracle databases using:
-	HP DataProtectorâ„¢
+	HP DataProtectorÃ¢â€žÂ¢
 
 HEREDOC
   print_usage
@@ -168,17 +170,18 @@ validate_catalog() {
   log "ERR: Catalog operations failed with ${ERRCOUNT} error(s)"
   return 2 #will allow for a rerun
  else
-  log "INF : Catalog operations  successfuly"
+  log "INF : Catalog operations successfuly"
  fi
 }
 
 validate_backup() {
- ERRCOUNT=`egrep "ERROR MESSAGE STACK FOLLOWS" ${RMANLOG} | wc -l`
+ #exclude from validation:
+  # RMAN-08120: WARNING: archived log not deleted, not yet applied by standby
+ ERRCOUNT=`egrep "ORA-|RMAN-" ${RMANLOG} | egrep -v "RMAN-08120" | wc -l`
  if [[ ERRCOUNT -gt 0 ]]; then
-  ERRORS=`sed -n "/RMAN-00571/,/Recovery Manager complete./p" ${RMANLOG}`
-  log "ERR: Backup failed with errors:"
-  log "${ERRORS}"
+  log "ERR: Backup failed with ${ERRCOUNT} error(s)"
   if [[ ! -z ${EMAILIST} ]]; then #send email with errors if email is defined
+	ERRORS=`sed -n "/RMAN-00571/,/Recovery Manager complete./p" ${RMANLOG}`
 	echo "$ERRORS" | mailx -s "Backup ${BACKUP_TYPE}@${DATABASE} ended with error" -a ${RMANLOG} ${EMAILIST} 2>/dev/null 
   fi
   return 2 #will allow for a rerun
@@ -187,18 +190,71 @@ validate_backup() {
  fi
 }
 
+check_stuck() {
+ RUNCOUNT=`sqlplus -L -s ${DBCONNECT} <<!
+set pages 0 feed off head off verify off lines 128 echo off term off
+select count(*) from gv\\$session where module like '%rman@%' and not exists (select count(1) from v\\$rman_status where status like '%RUNNING%');
+exit;
+!
+`
+ return ${RUNCOUNT}
+}
+
+validate_stuck() {
+# checks if stuck sessions exist on the database
+# stuck sessions may prevent further backups from completing sucessfully
+ check_stuck 
+ if [[ $? -gt 0 ]]; then
+  log "INF : There are ${RUNCOUNT} rman sessions stuck on the database"
+  KILLLOG=`sqlplus -L -s ${DBCONNECT} <<!
+set pages 0 feed off head off verify off lines 128 echo off term off
+begin
+ for sess in ( select sid || ',' || serial# || ',@' || inst_id || '' sse from gv\\$session where module like '%rman@%' and not exists (select count(1) from v\\$rman_status where status like '%RUNNING%') )
+ loop
+    execute immediate  'alter system kill session ''' || sess.sse || ''' immediate';
+ end loop;
+end;
+/
+exit;
+!
+` 
+  log "INF : ${RUNCOUNT} sessions killed"
+ fi
+}
+
+validate_running() {
+ #single execution?
+ STILRUN=`sqlplus -L -s ${DBCONNECT} <<!
+set pages 0 feed off head off verify off lines 128 echo off term off
+select count(1) from v\\\$rman_backup_job_details where status='RUNNING';
+exit;
+!
+`
+ return ${STILRUN}
+}
+
+exec_backup_stage() {
+ #identify stuck sessions and kill them
+ validate_stuck
+ #run backup
+ run_backup
+ #validate execution
+ validate_backup
+ return $?
+}
+
 exec_backup() {
   BACKUP_TYPE=${_BKTYPE}
   case ${BACKUP_TYPE} in
     l0) 
-      RMANOP=`printf "%s\n%s\n%s\n%s\n%s\n" "${RMANARC}" "${RMANL0}" "${RMANARC}"`
+      RMANOP=`printf "%s\n%s\n%s\n%s\n%s\n" "${RMANARC}" "${RMANL0}" "${RMANSPF}" "${RMANCTL}" "${RMANARC}"`
       ;;
     l1)
-      RMANOP=`printf "%s\n%s\n%s\n%s\n%s\n" "${RMANARC}" "${RMANL1}" "${RMANARC}"`
+      RMANOP=`printf "%s\n%s\n%s\n%s\n%s\n" "${RMANARC}" "${RMANL1}"  "${RMANSPF}" "${RMANCTL}" "${RMANARC}"`
       ;;
     arc|arch)
       BACKUP_TYPE=arc
-      RMANOP=`printf "%s\n%s\n%s\n" "${RMANARC}"`
+      RMANOP=`printf "%s\n%s\n%s\n" "${RMANARC}"  "${RMANSPF}" "${RMANCTL}"`
       ;;
     *) 
       print_help
@@ -209,10 +265,9 @@ exec_backup() {
   #variables
   DBCONNECT="${USERNAME}/${PASSWORD}@\"${TNSNAMES}\""
   CONF_RMAN_RETENTION="CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF ${RTENTION} DAYS;"
-  CONF_RMAN_CTL_AUTOBCK_ON="CONFIGURE CONTROLFILE AUTOBACKUP ON;"
-    
+  CONF_RMAN_CTL_AUTOBCK_ON="CONFIGURE CONTROLFILE AUTOBACKUP OFF;"
   #prepare backup 
-  RMANLOG=${BASEDIR}/log/rman_${DATABASE}_${BACKUP_TYPE}_${DATA}.log
+  RMANLOG=${BASEDIR}/log/rman_${DATABASE}_${BACKUP_TYPE}_${DATA}.1.log
   CMDFILE=${BASEDIR}/tmp/${DATABASE}_${BACKUP_TYPE}_${DATA}.cmd
   touch ${CMDFILE}
   echo "connect target ${DBCONNECT}" >> ${CMDFILE}
@@ -225,40 +280,38 @@ exec_backup() {
   for (( c=1; c<=${CHNNLNUM}; c++ ))
    do
    CHNUMBER=${c}
-   echo "$RMAN_CH" | sed -e 's/_CHNUMBER/'"${CHNUMBER}"'/g' -e 's/_DATABASE/'"${DATABASE}"'/g' >> ${CMDFILE}
+   echo "$RMAN_CH" | sed -e 's/_CHANNEL/'"ch${CHNUMBER}"'/g' -e 's/_DATABASE/'"${DATABASE}"'/g' >> ${CMDFILE}
   done;
   
   echo "${RMANOP}" >> ${CMDFILE}
+  
+  #release channels
+  for (( c=1; c<=${CHNNLNUM}; c++ ))
+   do
+   CHNUMBER=${c}
+   echo "release channel 'ch${CHNUMBER}';" >> ${CMDFILE}
+  done;
   echo "}" >> ${CMDFILE}
 
-  #single execution?
-  STILRUN=`sqlplus -L -s ${DBCONNECT} <<!
-  set pages 0 feed off head off verify off lines 128 echo off term off
-  select count(1) from v\\\$rman_backup_job_details where status='RUNNING';
-  exit;
-!
-`
-  if [[ "${STILRUN}" -gt  0 ]]; then
-    if [[ ${FORCERUN} -eq 1 ]]; then
-      log "INF: backup still running but forcing execution"
-    else
-      log "ERR: there is a backup session still running"
-      exit 1
-    fi
+  #validate running
+  validate_running
+  if [[ $? -gt  0 ]]; then
+   if [[ ${FORCERUN} -eq 1 ]]; then
+    log "INF: backup still running but forcing execution"
+   else
+    log "ERR: there is a backup session still running"
+    exit 1
+   fi
   fi
   
-  #run backup
-  run_backup
-  #validate execution
-  validate_backup
-  
+  #run the backup 
+  exec_backup_stage
   #retry failed arc
   if [[ ( $? -eq 2 ) ]]; then # if backup failed
-    if [[ ${BACKUP_TYPE} = 'arc' ]]; then  # and it is arc, retry
+    if [[ ${BACKUP_TYPE} = 'arc' || ${BACKUP_TYPE} = 'l1' ]]; then  # and it is arc or l1, retry
       log "INF : Retrying"
 	  RMANLOG=${BASEDIR}/log/rman_${DATABASE}_${BACKUP_TYPE}_${DATA}.2.log # use new log
-      run_backup
-      validate_backup
+      exec_backup_stage
       if [[ ( $? -eq 2 ) ]]; then            # if still fail after retrial, error; if not continue
         log "ERR : Backup failed after retrial"
         exit 2
