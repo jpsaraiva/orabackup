@@ -212,7 +212,7 @@ validate_backup() {
 check_stuck() {
  RUNCOUNT=`sqlplus -L -s ${DBCONNECT} <<!
 set pages 0 feed off head off verify off lines 128 echo off term off
-select count(*) from gv\\$session where module like '%rman@%' and not exists (select count(1) from v\\$rman_status where status like '%RUNNING%');
+select count(*) from gv\\$session where (module like 'rman@%' or client_info like 'rman channel=%') and logon_time between (select max(start_time) from v\\$rman_status where end_time is null and status in ('RUNNING WITH ERRORS','FAILED')) and (select max(end_time) from v\\$rman_status where end_time is not null and status = 'FAILED');
 exit;
 !
 `
@@ -228,7 +228,7 @@ validate_stuck() {
   KILLLOG=`sqlplus -L -s ${DBCONNECT} <<!
 set pages 0 feed off head off verify off lines 128 echo off term off
 begin
- for sess in ( select sid || ',' || serial# || ',@' || inst_id || '' sse from gv\\$session where module like '%rman@%' and not exists (select count(1) from v\\$rman_status where status like '%RUNNING%') )
+ for sess in ( select sid || ',' || serial# || ',@' || inst_id || '' sse from gv\\$session where (module like 'rman@%' or client_info like 'rman channel=%') and logon_time between (select max(start_time) from v\\$rman_status where end_time is null and status in ('RUNNING WITH ERRORS','FAILED')) and (select max(end_time) from v\\$rman_status where end_time is not null and status = 'FAILED') )
  loop
     execute immediate  'alter system kill session ''' || sess.sse || ''' immediate';
  end loop;
